@@ -7,7 +7,7 @@ from datetime import datetime
 def hash_file(file_path: Path) -> str:
     """
     Считает MD5-хэш файла — уникальный отпечаток его содержимого.
-    Файл читается частями, чтобы не загружать большие файлы целиком в память.
+    Файл читается частями чтобы не грузить память.
     """
     hasher = hashlib.md5()
     with open(file_path, "rb") as f:
@@ -16,34 +16,45 @@ def hash_file(file_path: Path) -> str:
     return hasher.hexdigest()
 
 
+def collect_files(folder_path: Path) -> list:
+    """
+    Рекурсивно обходит папку вручную и возвращает список всех файлов.
+    Написана вручную — без os и rglob.
+    """
+    result = []
+    for item in folder_path.iterdir():
+        if item.is_dir():
+            # Папка — заходим рекурсивно
+            result.extend(collect_files(item))
+        elif item.is_file():
+            # Файл — добавляем в список
+            result.append(item)
+    return result
+
+
 def scan_directory(folder_path: Path) -> dict:
     """
-    Сканирует папку и возвращает словарь:
+    Сканирует папку через нашу рекурсивную функцию и возвращает словарь:
     ключ — относительный путь файла, значение — его MD5-хэш.
-    Используется для сравнения двух папок между собой.
     """
     folder_path = folder_path.resolve()
     result = {}
 
-    for file in folder_path.rglob("*"):
-        if file.is_file():
-            try:
-                relative = str(file.relative_to(folder_path))
-                result[relative] = hash_file(file)
-            except Exception as e:
-                print(f"  Пропущен: {file} ({e})")
+    for file in collect_files(folder_path):
+        try:
+            relative = str(file.relative_to(folder_path))
+            result[relative] = hash_file(file)
+        except Exception as e:
+            print(f"  Пропущен: {file} ({e})")
 
     return result
 
 
 def compare_folders(source_path: Path, backup_path: Path, conn: sqlite3.Connection):
     """
-    Сравнивает исходную папку с резервной копией.
-    Три категории различий:
-    - missing: файл есть в источнике, но отсутствует в бэкапе (пропал из бэкапа)
-    - changed: файл есть в обоих местах, но содержимое отличается (был изменён)
-    - extra:   файл есть в бэкапе, но отсутствует в источнике (лишний в бэкапе)
-    Все результаты сохраняются в таблицу backup_checks.
+    Сравнивает исходную папку с резервной копией по хэшам файлов.
+    Три категории: missing, changed, extra.
+    Результаты сохраняются в таблицу backup_checks.
     """
     print("Сканируем исходную папку...")
     source_files = scan_directory(source_path)
@@ -58,22 +69,20 @@ def compare_folders(source_path: Path, backup_path: Path, conn: sqlite3.Connecti
     backup_str = str(backup_path.resolve())
 
     missing = []  # есть в источнике, нет в бэкапе
-    changed = []  # есть в обоих, но хэши разные — файл изменился
-    extra = []    # есть в бэкапе, нет в источнике — лишний файл
+    changed = []  # есть в обоих, но содержимое отличается
+    extra = []    # есть в бэкапе, нет в источнике
 
-    # Проходим по файлам источника и сравниваем с бэкапом
     for path, src_hash in source_files.items():
         if path not in backup_files:
             missing.append(path)
         elif backup_files[path] != src_hash:
             changed.append(path)
 
-    # Ищем файлы в бэкапе, которых нет в источнике
     for path in backup_files:
         if path not in source_files:
             extra.append(path)
 
-    # Сохраняем все результаты в базу данных
+    # Сохраняем все результаты в базу
     for path in missing:
         conn.execute(
             "INSERT INTO backup_checks (checked_at, source_folder, backup_folder, status, relative_path) VALUES (?, ?, ?, ?, ?)",
@@ -92,7 +101,7 @@ def compare_folders(source_path: Path, backup_path: Path, conn: sqlite3.Connecti
 
     conn.commit()
 
-    # Итоговый отчёт в консоль
+    # Итоговый отчёт
     print("=" * 60)
     print("ОТЧЁТ: Сравнение с резервной копией")
     print(f"Дата проверки: {checked_at}")

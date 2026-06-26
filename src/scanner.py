@@ -1,7 +1,25 @@
-import os
 from pathlib import Path
 from datetime import datetime
 import sqlite3
+
+
+def collect_files(folder_path: Path) -> list:
+    """
+    Рекурсивно обходит папку вручную и возвращает список всех файлов.
+    Используем iterdir() — он показывает содержимое папки (один уровень).
+    Если встречаем подпапку — вызываем функцию снова для неё (рекурсия).
+    Если встречаем файл — добавляем в список.
+    """
+    result = []
+    for item in folder_path.iterdir():
+        if item.is_dir():
+            # Это папка — заходим в неё и добавляем всё что нашли внутри
+            result.extend(collect_files(item))
+        elif item.is_file():
+            # Это файл — добавляем в список
+            result.append(item)
+    return result
+
 
 def scan_folder(folder_path: Path, conn: sqlite3.Connection, ext_filter: str = None):
     """
@@ -10,55 +28,44 @@ def scan_folder(folder_path: Path, conn: sqlite3.Connection, ext_filter: str = N
     conn — подключение к базе данных.
     ext_filter — необязательный фильтр по расширению, например ".txt"
     """
-
-    # Получаем абсолютный путь к папке (без ./ и ../)
     folder_path = folder_path.resolve()
-    count = 0  # Счётчик найденных файлов
+    count = 0
 
-    # os.walk обходит папку рекурсивно — заходит во все вложенные папки
-    # root — текущая папка, dirs — список подпапок, files — список файлов
-    for root, dirs, files in os.walk(folder_path):
-        for filename in files:
-            # Собираем полный путь к файлу
-            full_path = Path(root) / filename
+    # Получаем список всех файлов через нашу рекурсивную функцию
+    all_files = collect_files(folder_path)
 
-            # Если задан фильтр по расширению — пропускаем файлы, которые не подходят
-            if ext_filter and full_path.suffix.lower() != ext_filter.lower():
-                continue
+    for full_path in all_files:
+        # Если задан фильтр — пропускаем файлы с другим расширением
+        if ext_filter and full_path.suffix.lower() != ext_filter.lower():
+            continue
 
-            try:
-                # relative_path — путь относительно корневой папки сканирования
-                # Например: "подпапка\файл.txt" вместо полного пути
-                relative_path = str(full_path.relative_to(folder_path))
+        try:
+            # Относительный путь — без корневой папки
+            relative_path = str(full_path.relative_to(folder_path))
 
-                # Размер файла в байтах
-                size = full_path.stat().st_size
+            # Размер файла в байтах
+            size = full_path.stat().st_size
 
-                # Дата последнего изменения файла, переведённая в читаемый формат
-                modified_at = datetime.fromtimestamp(
-                    full_path.stat().st_mtime
-                ).strftime("%Y-%m-%d %H:%M:%S")
+            # Дата последнего изменения в читаемом формате
+            modified_at = datetime.fromtimestamp(
+                full_path.stat().st_mtime
+            ).strftime("%Y-%m-%d %H:%M:%S")
 
-                # Расширение файла (.txt, .jpg и т.д.), или None если его нет
-                extension = full_path.suffix.lower() or None
+            # Расширение файла (.txt, .jpg и т.д.)
+            extension = full_path.suffix.lower() or None
 
-                # INSERT OR IGNORE — если файл уже есть в базе (по relative_path),
-                # он не добавится повторно, просто пропустится
-                conn.execute("""
-                    INSERT OR IGNORE INTO files
-                        (relative_path, size, modified_at, extension)
-                    VALUES (?, ?, ?, ?)
-                """, (relative_path, size, modified_at, extension))
+            # Сохраняем в базу. INSERT OR IGNORE — не дублируем если уже есть
+            conn.execute("""
+                INSERT OR IGNORE INTO files
+                    (relative_path, size, modified_at, extension)
+                VALUES (?, ?, ?, ?)
+            """, (relative_path, size, modified_at, extension))
 
-                count += 1
+            count += 1
+            print(f"  [{extension or 'без расш.'}] {relative_path} — {size} байт")
 
-                # Выводим информацию о каждом файле в консоль
-                print(f"  [{extension or 'без расш.'}] {relative_path} — {size} байт")
+        except Exception as e:
+            print(f"  Пропущен: {full_path} ({e})")
 
-            except Exception as e:
-                # Если файл недоступен (нет прав и т.д.) — пропускаем и сообщаем
-                print(f"  Пропущен: {full_path} ({e})")
-
-    # Сохраняем все изменения в базу данных
     conn.commit()
     print(f"\nСканирование завершено. Найдено файлов: {count}")
